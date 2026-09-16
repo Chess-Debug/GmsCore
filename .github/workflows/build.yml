@@ -62,3 +62,6 @@ jobs:
         run: "./gradlew assemble${{ matrix.target }}"
       - name: "Execute Gradle lint"
         run: "./gradlew lint${{ matrix.target }}"
+      - name: "Execute Gradle unit tests"
+        if: matrix.target == 'Debug'
+        run: "./gradlew test"
