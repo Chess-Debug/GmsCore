@@ -1,0 +1,58 @@
++                GaiaConsent(asterism_client = AsterismClient.RCS, consent = Consent.CONSENTED))),
++            AsterismClient.RCS))
++    }
++
++    @Test fun matchingGaiaNoConsentOverridesRcsFallbackConsent() {
++        assertFalse(hasRequiredVerificationConsent(
++            GetConsentResponse(
++                rcs_consent = RcsConsent(consent = Consent.CONSENTED),
++                gaia_consents = listOf(
++                    GaiaConsent(asterism_client = AsterismClient.RCS, consent = Consent.NO_CONSENT))
++            ),
++            AsterismClient.RCS))
++    }
++
++    @Test fun absentConsentFailsClosed() {
++        assertFalse(hasRequiredVerificationConsent(GetConsentResponse(), AsterismClient.RCS))
++    }
++
++    @Test fun unrelatedGaiaConsentDoesNotMaskDedicatedRcsConsent() {
++        assertTrue(hasRequiredVerificationConsent(
++            GetConsentResponse(
++                rcs_consent = RcsConsent(consent = Consent.CONSENTED),
++                gaia_consents = listOf(
++                    GaiaConsent(asterism_client = AsterismClient.CONSTELLATION, consent = Consent.NO_CONSENT))
++            ),
++            AsterismClient.RCS))
++    }
++
++    @Test fun nonRcsClientCannotUseDedicatedRcsConsent() {
++        assertFalse(hasRequiredVerificationConsent(
++            GetConsentResponse(rcs_consent = RcsConsent(consent = Consent.CONSENTED)),
++            AsterismClient.CONSTELLATION))
++    }
++}
+diff --git a/play-services-constellation/core/src/test/kotlin/org/microg/gms/constellation/core/verification/MtSmsInboxRegistryTest.kt b/play-services-constellation/core/src/test/kotlin/org/microg/gms/constellation/core/verification/MtSmsInboxRegistryTest.kt
+new file mode 100644
+index 00000000..ca0fed1e
+--- /dev/null
++++ b/play-services-constellation/core/src/test/kotlin/org/microg/gms/constellation/core/verification/MtSmsInboxRegistryTest.kt
+@@ -0,0 +1,18 @@
++package org.microg.gms.constellation.core.verification
++
++import org.junit.Assert.assertEquals
++import org.junit.Test
++
++class MtSmsInboxRegistryTest {
++    @Test fun activeSubscriptionsAlsoPrepareGlobalFallback() {
++        assertEquals(listOf(1, 2, -1), effectiveMtSmsInboxSubIds(listOf(1, 2)))
++    }
++
++    @Test fun duplicateAndInvalidIdsAreNormalized() {
++        assertEquals(listOf(3, -1), effectiveMtSmsInboxSubIds(listOf(3, 3, -1, -5)))
++    }
++
++    @Test fun noActiveSubscriptionStillPreparesGlobalFallback() {
++        assertEquals(listOf(-1), effectiveMtSmsInboxSubIds(emptyList()))
++    }
++}
