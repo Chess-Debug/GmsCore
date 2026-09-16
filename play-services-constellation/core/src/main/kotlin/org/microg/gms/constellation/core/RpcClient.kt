@@ -7,18 +7,22 @@ import org.microg.gms.constellation.core.proto.PhoneDeviceVerificationClient
 import org.microg.gms.constellation.core.proto.PhoneNumberClient
 import java.util.concurrent.TimeUnit
 
+internal const val CONSTELLATION_RPC_TIMEOUT_SECONDS = 60L
+
+internal fun newConstellationHttpClient(): OkHttpClient = OkHttpClient.Builder()
+    .readTimeout(CONSTELLATION_RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+    .addInterceptor { chain ->
+        val originalRequest = chain.request()
+        val builder = originalRequest.newBuilder()
+            .header("X-Goog-Api-Key", "AIzaSyAP-gfH3qvi6vgHZbSYwQ_XHqV_mXHhzIk")
+            .header("X-Android-Package", Constants.GMS_PACKAGE_NAME)
+            .header("X-Android-Cert", Constants.GMS_PACKAGE_SIGNATURE_SHA1.uppercase())
+        chain.proceed(builder.build())
+    }
+    .build()
+
 object RpcClient {
-    private val client: OkHttpClient = OkHttpClient.Builder()
-        .readTimeout(60, TimeUnit.SECONDS)
-        .addInterceptor { chain ->
-            val originalRequest = chain.request()
-            val builder = originalRequest.newBuilder()
-                .header("X-Goog-Api-Key", "AIzaSyAP-gfH3qvi6vgHZbSYwQ_XHqV_mXHhzIk")
-                .header("X-Android-Package", Constants.GMS_PACKAGE_NAME)
-                .header("X-Android-Cert", Constants.GMS_PACKAGE_SIGNATURE_SHA1.uppercase())
-            chain.proceed(builder.build())
-        }
-        .build()
+    private val client: OkHttpClient = newConstellationHttpClient()
 
     private val grpcClient: GrpcClient = GrpcClient.Builder()
         .client(client)
