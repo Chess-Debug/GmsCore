@@ -1,0 +1,120 @@
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class SamsungCompositeTokenCodecTest {
++    @Test fun exactKnownFixtureMatchesWireContract() {
++        val raw = SamsungCompositeTokenCodec.encodeProto("iid-token", "pia-token")
++        assertEquals("CglpaWQtdG9rZW4SCXBpYS10b2tlbg==", Base64.getUrlEncoder().encodeToString(raw))
++    }
++    @Test fun missingProducerInputReturnsNoCompositeToken() {
++        assertNull(SamsungCompositeTokenCodec.encodeForImsOrNull(null, "pia"))
++        assertNull(SamsungCompositeTokenCodec.encodeForImsOrNull("iid", null))
++        assertNull(SamsungCompositeTokenCodec.encodeForImsOrNull("", "pia"))
++        assertNull(SamsungCompositeTokenCodec.encodeForImsOrNull("iid", ""))
++    }
++    @Test fun longTokenLengthUsesProtobufVarint() {
++        val raw = SamsungCompositeTokenCodec.encodeProto("i".repeat(130), "p")
++        assertEquals(0x0a, raw[0].toInt() and 0xff)
++        assertEquals(0x82, raw[1].toInt() and 0xff)
++        assertEquals(0x01, raw[2].toInt() and 0xff)
++        assertTrue(raw.size > 135)
++    }
++}
+diff --git a/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/ClientSignatureInvariant.kt b/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/ClientSignatureInvariant.kt
+new file mode 100644
+index 00000000..ebefd673
+--- /dev/null
++++ b/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/ClientSignatureInvariant.kt
+@@ -0,0 +1,6 @@
++package org.microg.gms.constellation.core
++
++internal fun requireNonEmptyClientSignature(signature: ByteArray): ByteArray {
++    require(signature.isNotEmpty()) { "Client signature is empty" }
++    return signature
++}
+diff --git a/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/GetIidToken.kt b/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/GetIidToken.kt
+index 47099ce3..9a4eb012 100644
+--- a/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/GetIidToken.kt
++++ b/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/GetIidToken.kt
+@@ -50,6 +50,7 @@ internal suspend fun handleGetIidToken(
+         require(iidToken.isNotEmpty()) { "Instance ID token is empty" }
+         val fid = credentialProvider.getFid()
+         val (signature, timestamp) = credentialProvider.signIidToken(iidToken)
++        requireNonEmptyClientSignature(signature)
+ 
+         callbacks.onIidTokenGenerated(
+             Status.SUCCESS,
+diff --git a/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/GetVerifiedPhoneNumbers.kt b/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/GetVerifiedPhoneNumbers.kt
+index 18c1c0e3..b61fb071 100644
+--- a/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/GetVerifiedPhoneNumbers.kt
++++ b/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/GetVerifiedPhoneNumbers.kt
+@@ -46,6 +46,7 @@ internal suspend fun fetchVerifiedPhoneNumbers(
+     require(iidToken.isNotEmpty()) { "Instance ID token is empty" }
+     val iidTokenAuth = if (VerifyPhoneNumberApiPhenotypes.ENABLE_CLIENT_SIGNATURE) {
+         val (signatureBytes, signTimestamp) = signIidToken(iidToken)
++        requireNonEmptyClientSignature(signatureBytes)
+         IIDTokenAuth(
+             iid_token = iidToken,
+             client_sign = signatureBytes.toByteString(),
+diff --git a/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/RpcClient.kt b/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/RpcClient.kt
+index 4d5ebe7e..9fe9bd69 100644
+--- a/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/RpcClient.kt
++++ b/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/RpcClient.kt
+@@ -31,7 +31,10 @@ object RpcClient {
+     }
+ 
+     private val client: OkHttpClient = OkHttpClient.Builder()
++        .connectTimeout(60, TimeUnit.SECONDS)
+         .readTimeout(60, TimeUnit.SECONDS)
++        .writeTimeout(60, TimeUnit.SECONDS)
++        .callTimeout(60, TimeUnit.SECONDS)
+         .addInterceptor { chain ->
+             val originalRequest = chain.request()
+             val builder = originalRequest.newBuilder()
+diff --git a/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/VerifyPhoneNumber.kt b/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/VerifyPhoneNumber.kt
+index 4a20eff0..d8baf124 100644
+--- a/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/VerifyPhoneNumber.kt
++++ b/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/VerifyPhoneNumber.kt
+@@ -230,6 +230,7 @@ private suspend fun handleVerifyPhoneNumberRequest(
+         Log.e(TAG, "verifyPhoneNumber failed", e)
+         when {
+             e is PhoneNumberVerificationDisabledException -> Status(5000)
++            e is NoConsentException -> Status(5001)
+             readCallbackMode != ReadCallbackMode.NONE -> Status.INTERNAL_ERROR
+             e is GrpcException -> handleRpcError(e)
+             else -> Status.INTERNAL_ERROR
+@@ -269,6 +270,7 @@ private suspend fun handleVerifyPhoneNumberRequest(
+ }
+ 
+ private class PhoneNumberVerificationDisabledException : Exception("Phone number verification is disabled")
++internal class NoConsentException : Exception("RCS consent is required")
+ 
+ private fun handleRpcError(error: GrpcException): Status {
+     val statusCode = when (error.grpcStatus) {
+@@ -283,6 +285,19 @@ private fun handleRpcError(error: GrpcException): Status {
+     return Status(statusCode, error.message)
+ }
+ 
++internal fun hasRequiredVerificationConsent(
++    response: GetConsentResponse,
++    asterismClient: AsterismClient
++): Boolean {
++    response.gaia_consents.firstOrNull {
++        it.asterism_client == asterismClient
++    }?.let { matchingGaia ->
++        return matchingGaia.consent == Consent.CONSENTED
++    }
++    return asterismClient == AsterismClient.RCS &&
++            response.rcs_consent?.consent == Consent.CONSENTED
++}
++
+ private suspend fun runVerificationFlow(
+     context: Context,
+     request: VerifyPhoneNumberRequest,
+@@ -308,37 +323,8 @@ private suspend fun runVerificationFlow(
+             sessionId,
+         )
+ 
+-        val consented = consent.rcs_consent?.consent == Consent.CONSENTED ||
