@@ -10,7 +10,10 @@ import java.util.concurrent.TimeUnit
 internal const val CONSTELLATION_RPC_TIMEOUT_SECONDS = 60L
 
 internal fun newConstellationHttpClient(): OkHttpClient = OkHttpClient.Builder()
+    .connectTimeout(CONSTELLATION_RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS)
     .readTimeout(CONSTELLATION_RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+    .writeTimeout(CONSTELLATION_RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+    .callTimeout(CONSTELLATION_RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS)
     .addInterceptor { chain ->
         val originalRequest = chain.request()
         val builder = originalRequest.newBuilder()
