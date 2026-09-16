@@ -1,0 +1,109 @@
+name: Foundragon merge upstream master
+
+on:
+  push:
+    branches:
+      - foundragon/merge-upstream-master
+
+permissions:
+  contents: write
+
+jobs:
+  merge-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout validated source branch
+        uses: actions/checkout@v4
+        with:
+          ref: foundragon/rcs-rc1-source
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "Chess-Debug"
+          git config user.email "venomousnoxious@gmail.com"
+
+      - name: Fetch current upstream master
+        run: |
+          git remote add upstream https://github.com/microg/GmsCore.git || true
+          git fetch upstream master
+          test "$(git rev-parse upstream/master)" = "4c74e5acb79479004428be755547432294639878"
+
+      - name: Merge and resolve only the known Phenotype overlap
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          git merge --no-commit --no-ff upstream/master
+          rc=$?
+          set -e
+
+          conflicts="$(git diff --name-only --diff-filter=U)"
+          if [ -n "$conflicts" ]; then
+            expected="play-services-core/src/main/kotlin/org/microg/gms/phenotype/PhenotypeService.kt"
+            if [ "$conflicts" != "$expected" ]; then
+              echo "Unexpected merge conflicts:"
+              echo "$conflicts"
+              exit 1
+            fi
+
+            # Keep the already validated Foundragon/RCS version as the base,
+            # then transplant only upstream's current Translate configuration block.
+            git checkout --ours "$expected"
+            python3 - <<'PY'
+from pathlib import Path
+import subprocess
+
+path = Path('play-services-core/src/main/kotlin/org/microg/gms/phenotype/PhenotypeService.kt')
+ours = path.read_text()
+upstream = subprocess.check_output([
+    'git','show','upstream/master:play-services-core/src/main/kotlin/org/microg/gms/phenotype/PhenotypeService.kt'
+], text=True)
+
+marker = '    "com.google.android.apps.translate" to arrayOf(\n'
+
+def block(text: str) -> str:
+    start = text.index(marker)
+    end = text.index('    ),\n', start) + len('    ),\n')
+    return text[start:end]
+
+ours_block = block(ours)
+upstream_block = block(upstream)
+merged = ours.replace(ours_block, upstream_block, 1)
+path.write_text(merged)
+PY
+            git add "$expected"
+          elif [ "$rc" -ne 0 ]; then
+            echo "Merge failed without a reported conflict"
+            exit "$rc"
+          fi
+
+          unresolved="$(git diff --name-only --diff-filter=U)"
+          test -z "$unresolved"
+          git diff --check
+
+          # Mechanical invariants from the final pre-PR catch.
+          python3 - <<'PY'
+from pathlib import Path
+p = Path('play-services-core/src/main/kotlin/org/microg/gms/phenotype/PhenotypeService.kt')
+s = p.read_text()
+key = '"com.google.android.apps.messaging#com.google.android.apps.messaging" to arrayOf('
+assert s.count(key) == 1, s.count(key)
+for flag in [
+    'bugle_phenotype__enable_penpal_conversation',
+    'bugle_phenotype__bug_325090692_enable_penpal_dasher_check',
+    'bugle_phenotype__enableDownloadCertificatesForMlsProvisioning',
+    'bugle_phenotype__enableUploadKeyPackagesForMlsProvisioning',
+    'LanguagePickerRecyclerView__language_picker_recycler_view',
+    'LanguagePickerRecyclerView__enable_pinned_languages',
+    'LanguagePickerRecyclerView__enable_swipe_onboarding',
+    'FullScreenTranslation__enable_full_screen_translation',
+]:
+    assert flag in s, flag
+PY
+
+      - name: Commit merged upstream and push source branch
+        run: |
+          git commit -m "merge: sync final RCS RC with upstream master"
+          git push origin HEAD:foundragon/rcs-rc1-source
