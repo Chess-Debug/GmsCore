@@ -48,31 +48,26 @@ jobs:
               exit 1
             fi
 
-            # Keep the already validated Foundragon/RCS version as the base,
-            # then transplant only upstream's current Translate configuration block.
             git checkout --ours "$expected"
             python3 - <<'PY'
-from pathlib import Path
-import subprocess
+          from pathlib import Path
+          import subprocess
 
-path = Path('play-services-core/src/main/kotlin/org/microg/gms/phenotype/PhenotypeService.kt')
-ours = path.read_text()
-upstream = subprocess.check_output([
-    'git','show','upstream/master:play-services-core/src/main/kotlin/org/microg/gms/phenotype/PhenotypeService.kt'
-], text=True)
+          path = Path('play-services-core/src/main/kotlin/org/microg/gms/phenotype/PhenotypeService.kt')
+          ours = path.read_text()
+          upstream = subprocess.check_output([
+              'git', 'show', 'upstream/master:play-services-core/src/main/kotlin/org/microg/gms/phenotype/PhenotypeService.kt'
+          ], text=True)
 
-marker = '    "com.google.android.apps.translate" to arrayOf(\n'
+          marker = '    "com.google.android.apps.translate" to arrayOf(\n'
 
-def block(text: str) -> str:
-    start = text.index(marker)
-    end = text.index('    ),\n', start) + len('    ),\n')
-    return text[start:end]
+          def block(text: str) -> str:
+              start = text.index(marker)
+              end = text.index('    ),\n', start) + len('    ),\n')
+              return text[start:end]
 
-ours_block = block(ours)
-upstream_block = block(upstream)
-merged = ours.replace(ours_block, upstream_block, 1)
-path.write_text(merged)
-PY
+          path.write_text(ours.replace(block(ours), block(upstream), 1))
+          PY
             git add "$expected"
           elif [ "$rc" -ne 0 ]; then
             echo "Merge failed without a reported conflict"
@@ -83,25 +78,23 @@ PY
           test -z "$unresolved"
           git diff --check
 
-          # Mechanical invariants from the final pre-PR catch.
           python3 - <<'PY'
-from pathlib import Path
-p = Path('play-services-core/src/main/kotlin/org/microg/gms/phenotype/PhenotypeService.kt')
-s = p.read_text()
-key = '"com.google.android.apps.messaging#com.google.android.apps.messaging" to arrayOf('
-assert s.count(key) == 1, s.count(key)
-for flag in [
-    'bugle_phenotype__enable_penpal_conversation',
-    'bugle_phenotype__bug_325090692_enable_penpal_dasher_check',
-    'bugle_phenotype__enableDownloadCertificatesForMlsProvisioning',
-    'bugle_phenotype__enableUploadKeyPackagesForMlsProvisioning',
-    'LanguagePickerRecyclerView__language_picker_recycler_view',
-    'LanguagePickerRecyclerView__enable_pinned_languages',
-    'LanguagePickerRecyclerView__enable_swipe_onboarding',
-    'FullScreenTranslation__enable_full_screen_translation',
-]:
-    assert flag in s, flag
-PY
+          from pathlib import Path
+          s = Path('play-services-core/src/main/kotlin/org/microg/gms/phenotype/PhenotypeService.kt').read_text()
+          key = '"com.google.android.apps.messaging#com.google.android.apps.messaging" to arrayOf('
+          assert s.count(key) == 1, s.count(key)
+          for flag in [
+              'bugle_phenotype__enable_penpal_conversation',
+              'bugle_phenotype__bug_325090692_enable_penpal_dasher_check',
+              'bugle_phenotype__enableDownloadCertificatesForMlsProvisioning',
+              'bugle_phenotype__enableUploadKeyPackagesForMlsProvisioning',
+              'LanguagePickerRecyclerView__language_picker_recycler_view',
+              'LanguagePickerRecyclerView__enable_pinned_languages',
+              'LanguagePickerRecyclerView__enable_swipe_onboarding',
+              'FullScreenTranslation__enable_full_screen_translation',
+          ]:
+              assert flag in s, flag
+          PY
 
       - name: Commit merged upstream and push source branch
         run: |
