@@ -1,0 +1,78 @@
+name: Foundragon promote validated RC1
+
+on:
+  push:
+    branches:
+      - 'foundragon/diag-lint-4f9ad97b'
+    paths:
+      - '.github/workflows/foundragon-promote-rc1.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: foundragon-promote-rc1
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      GRADLE_MICROG_VERSION_WITHOUT_GIT: 1
+    steps:
+      - name: Checkout promotion control
+        uses: actions/checkout@v4
+        with:
+          path: control
+          fetch-depth: 0
+
+      - name: Checkout validated source branch
+        uses: actions/checkout@v4
+        with:
+          ref: foundragon/rcs-rc1-source
+          path: gmscore
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Reconstruct and verify canonical private-green diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C gmscore rev-parse HEAD)" = "e8bd5e1e2332490148736e7787de19c74fa5f3dd"
+          cat control/.foundragon/rc1/patch.aa control/.foundragon/rc1/patch.ab control/.foundragon/rc1/patch.ac control/.foundragon/rc1/patch.ad > /tmp/rc1-private-source.diff
+          echo 'aba2ea9e0abf3cf33af44fc5287a323b3824df8fd1cc3d57aff5282a2056bac2  /tmp/rc1-private-source.diff' | sha256sum -c -
+
+      - name: Apply exact validated RC1 delta
+        working-directory: gmscore
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --check /tmp/rc1-private-source.diff
+          git apply /tmp/rc1-private-source.diff
+          git diff --check
+          git status --short
+
+      - name: Re-run targeted regression gates before push
+        working-directory: gmscore
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --stacktrace \
+            :play-services-asterism-core:testDebugUnitTest \
+            :play-services-constellation-core:testDebugUnitTest \
+            :play-services-asterism-core:lintDebug \
+            :play-services-constellation-core:lintDebug
+
+      - name: Commit and promote
+        working-directory: gmscore
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'Chess-Debug'
+          git config user.email 'venomousnoxious@gmail.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix(rcs): promote validated consent, credential, SMS and Samsung hardening' -m 'Promotes the exact Foundragon RC1 delta validated in private CI. Preserves prior contributor provenance and keeps Samsung CompositeToken compatibility separate from Google Constellation IID semantics.'
+          git push origin HEAD:foundragon/rcs-rc1-source
