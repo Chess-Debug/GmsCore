@@ -1,4 +1,4 @@
-name: "Foundragon DroidGuard lint"
+name: "Foundragon full lint"
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
       - "foundragon/diag-lint-4f9ad97b"
 
 jobs:
-  lint-droidguard-debug:
+  lint-all:
     runs-on: ubuntu-latest
     env:
       GRADLE_MICROG_VERSION_WITHOUT_GIT: 1
@@ -20,5 +20,5 @@ jobs:
           java-version: "17"
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
-      - name: Lint DroidGuard core Debug
-        run: ./gradlew :play-services-droidguard-core:lintDebug --console=plain
+      - name: Lint full monorepo Debug and Release
+        run: ./gradlew lintDebug lintRelease --console=plain
