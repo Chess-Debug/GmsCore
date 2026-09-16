@@ -1,0 +1,132 @@
+name: Foundragon verify and fix Messages phenotype duplicate key
+
+on:
+  push:
+    branches:
+      - 'foundragon/diag-phenotype-duplicate'
+    paths:
+      - '.github/workflows/foundragon-phenotype-duplicate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  verify-fix-promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      GRADLE_MICROG_VERSION_WITHOUT_GIT: 1
+    steps:
+      - name: Checkout source RC
+        uses: actions/checkout@v4
+        with:
+          ref: foundragon/rcs-rc1-source
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Freeze base and add BEFORE regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "f0ba080ec89d6884e3934b8b85184ccddda87865"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('play-services-core/src/main/kotlin/org/microg/gms/phenotype/PhenotypeService.kt')
+          s = p.read_text()
+          old = 'private val CONFIGURATION_OPTIONS = mapOf('
+          assert s.count(old) == 1
+          p.write_text(s.replace(old, 'internal val CONFIGURATION_OPTIONS = mapOf(', 1))
+          PY
+          mkdir -p play-services-core/src/test/kotlin/org/microg/gms/phenotype
+          cat > play-services-core/src/test/kotlin/org/microg/gms/phenotype/PhenotypeConfigurationTest.kt <<'EOF'
+          package org.microg.gms.phenotype
+
+          import org.junit.Assert.assertEquals
+          import org.junit.Test
+
+          class PhenotypeConfigurationTest {
+              @Test
+              fun messagesConfigurationKeepsAllRcsAndPenpalFlags() {
+                  val flags = requireNotNull(
+                      CONFIGURATION_OPTIONS["com.google.android.apps.messaging#com.google.android.apps.messaging"]
+                  )
+                  assertEquals(4, flags.size)
+              }
+          }
+          EOF
+          ./gradlew -q :play-services-core:tasks --all > /tmp/core-tasks.txt
+          mapfile -t TASKS < <(awk '{print $1}' /tmp/core-tasks.txt | grep -E '^test.*DebugUnitTest$' | sort -u)
+          test "${#TASKS[@]}" -gt 0
+          SELECTED="${TASKS[0]}"
+          for task in "${TASKS[@]}"; do
+            if [[ "$task" =~ Mapbox.*Default|Default.*Mapbox ]]; then SELECTED="$task"; break; fi
+          done
+          echo "$SELECTED" > /tmp/selected-task.txt
+
+      - name: Prove BEFORE failure
+        shell: bash
+        run: |
+          set -uo pipefail
+          SELECTED="$(cat /tmp/selected-task.txt)"
+          set +e
+          ./gradlew --stacktrace ":play-services-core:$SELECTED" --tests 'org.microg.gms.phenotype.PhenotypeConfigurationTest'
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo 'Regression unexpectedly passed before fix' >&2
+            exit 1
+          fi
+          echo "BEFORE failed as expected (exit=$rc)"
+
+      - name: Apply minimal duplicate-key fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('play-services-core/src/main/kotlin/org/microg/gms/phenotype/PhenotypeService.kt')
+          s = p.read_text()
+          first = '''    "com.google.android.apps.messaging#com.google.android.apps.messaging" to arrayOf(
+                  Flag("bugle_phenotype__enable_penpal_conversation", true, 0),
+                  Flag("bugle_phenotype__bug_325090692_enable_penpal_dasher_check", false, 0),
+              ),
+          '''
+          merged = '''    "com.google.android.apps.messaging#com.google.android.apps.messaging" to arrayOf(
+                  Flag("bugle_phenotype__enable_penpal_conversation", true, 0),
+                  Flag("bugle_phenotype__bug_325090692_enable_penpal_dasher_check", false, 0),
+                  Flag("bugle_phenotype__enableDownloadCertificatesForMlsProvisioning", true, 0),
+                  Flag("bugle_phenotype__enableUploadKeyPackagesForMlsProvisioning", true, 0),
+              ),
+          '''
+          second = '''    "com.google.android.apps.messaging#com.google.android.apps.messaging" to arrayOf(
+                  Flag("bugle_phenotype__enableDownloadCertificatesForMlsProvisioning", true, 0),
+                  Flag("bugle_phenotype__enableUploadKeyPackagesForMlsProvisioning", true, 0),
+              )
+          '''
+          assert s.count(first) == 1, s.count(first)
+          assert s.count(second) == 1, s.count(second)
+          s = s.replace(first, merged, 1)
+          s = s.replace(second, '', 1)
+          p.write_text(s)
+          PY
+          git diff --check
+
+      - name: Prove AFTER pass
+        shell: bash
+        run: |
+          set -euo pipefail
+          SELECTED="$(cat /tmp/selected-task.txt)"
+          ./gradlew --stacktrace ":play-services-core:$SELECTED" --tests 'org.microg.gms.phenotype.PhenotypeConfigurationTest'
+
+      - name: Commit and promote fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'Chess-Debug'
+          git config user.email 'venomousnoxious@gmail.com'
+          git add play-services-core/src/main/kotlin/org/microg/gms/phenotype/PhenotypeService.kt \
+                  play-services-core/src/test/kotlin/org/microg/gms/phenotype/PhenotypeConfigurationTest.kt
+          git diff --cached --check
+          git commit -m 'fix(phenotype): preserve all Google Messages configuration flags' -m 'A duplicate mapOf key caused the later Messages entry to replace the earlier one at runtime. Consolidate the four intended flags under one key and retain a JVM regression proving the complete flag set.'
+          git push origin HEAD:foundragon/rcs-rc1-source
