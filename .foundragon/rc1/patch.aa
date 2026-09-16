@@ -1,0 +1,120 @@
+diff --git a/play-services-asterism/core/src/main/kotlin/org/microg/gms/asterism/core/SetAsterismConsentHandler.kt b/play-services-asterism/core/src/main/kotlin/org/microg/gms/asterism/core/SetAsterismConsentHandler.kt
+index 5110ae26..2ed71cef 100644
+--- a/play-services-asterism/core/src/main/kotlin/org/microg/gms/asterism/core/SetAsterismConsentHandler.kt
++++ b/play-services-asterism/core/src/main/kotlin/org/microg/gms/asterism/core/SetAsterismConsentHandler.kt
+@@ -47,6 +47,16 @@ import java.util.UUID
+ 
+ private const val TAG = "SetAsterismConsent"
+ 
++internal fun isRcsConsentFastPath(
++    asterismClient: AsterismClient,
++    consentVersion: ConsentVersion?
++): Boolean = asterismClient == AsterismClient.RCS && consentVersion in listOf(
++    ConsentVersion.RCS_CONSENT,
++    ConsentVersion.RCS_DEFAULT_ON_LEGAL_FYI,
++    ConsentVersion.RCS_DEFAULT_ON_OUT_OF_BOX,
++    ConsentVersion.RCS_DEFAULT_ON_LEGAL_FYI_IN_SETTINGS
++)
++
+ suspend fun handleSetAsterismConsent(
+     context: Context,
+     callbacks: IAsterismCallbacks,
+@@ -78,11 +88,9 @@ suspend fun handleSetAsterismConsent(
+             ConsentVersion.RCS_DEFAULT_ON_LEGAL_FYI,
+             ConsentVersion.RCS_DEFAULT_ON_OUT_OF_BOX
+         )
+-        val hasRcsFastPath = request.asterismClient == AsterismClient.RCS &&
+-                request.consentVersion in listOf(
+-            ConsentVersion.RCS_DEFAULT_ON_LEGAL_FYI,
+-            ConsentVersion.RCS_DEFAULT_ON_OUT_OF_BOX,
+-            ConsentVersion.RCS_DEFAULT_ON_LEGAL_FYI_IN_SETTINGS
++        val hasRcsFastPath = isRcsConsentFastPath(
++            request.asterismClient,
++            request.consentVersion
+         )
+ 
+         if (request.asterismClient != AsterismClient.RCS && isRcsSpecificConsentVersion) {
+diff --git a/play-services-asterism/core/src/main/kotlin/org/microg/gms/asterism/core/samsung/SamsungCompositeTokenCodec.kt b/play-services-asterism/core/src/main/kotlin/org/microg/gms/asterism/core/samsung/SamsungCompositeTokenCodec.kt
+new file mode 100644
+index 00000000..d39716c4
+--- /dev/null
++++ b/play-services-asterism/core/src/main/kotlin/org/microg/gms/asterism/core/samsung/SamsungCompositeTokenCodec.kt
+@@ -0,0 +1,36 @@
++package org.microg.gms.asterism.core.samsung
++
++import android.util.Base64
++import java.io.ByteArrayOutputStream
++import java.nio.charset.StandardCharsets
++
++internal object SamsungCompositeTokenCodec {
++    fun encodeProto(iidToken: String, piaToken: String): ByteArray {
++        require(iidToken.isNotBlank()) { "IID token is required" }
++        require(piaToken.isNotBlank()) { "PIA token is required" }
++        return ByteArrayOutputStream().also { out ->
++            writeStringField(out, 1, iidToken)
++            writeStringField(out, 2, piaToken)
++        }.toByteArray()
++    }
++    fun encodeForIms(iidToken: String, piaToken: String): String =
++        Base64.encodeToString(encodeProto(iidToken, piaToken), Base64.NO_WRAP or Base64.URL_SAFE)
++    fun encodeForImsOrNull(iidToken: String?, piaToken: String?): String? {
++        if (iidToken.isNullOrBlank() || piaToken.isNullOrBlank()) return null
++        return encodeForIms(iidToken, piaToken)
++    }
++    private fun writeStringField(out: ByteArrayOutputStream, field: Int, value: String) {
++        val bytes = value.toByteArray(StandardCharsets.UTF_8)
++        writeVarint(out, (field shl 3) or 2)
++        writeVarint(out, bytes.size)
++        out.write(bytes)
++    }
++    private fun writeVarint(out: ByteArrayOutputStream, input: Int) {
++        var value = input
++        while (true) {
++            if (value and 0x7f.inv() == 0) { out.write(value); return }
++            out.write((value and 0x7f) or 0x80)
++            value = value ushr 7
++        }
++    }
++}
+diff --git a/play-services-asterism/core/src/test/kotlin/org/microg/gms/asterism/core/RcsConsentFastPathTest.kt b/play-services-asterism/core/src/test/kotlin/org/microg/gms/asterism/core/RcsConsentFastPathTest.kt
+new file mode 100644
+index 00000000..c394f035
+--- /dev/null
++++ b/play-services-asterism/core/src/test/kotlin/org/microg/gms/asterism/core/RcsConsentFastPathTest.kt
+@@ -0,0 +1,27 @@
++package org.microg.gms.asterism.core
++
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import org.microg.gms.constellation.core.proto.AsterismClient
++import org.microg.gms.constellation.core.proto.ConsentVersion
++
++class RcsConsentFastPathTest {
++    @Test fun rcsConsentVersionUsesMinimalRcsFastPath() {
++        assertTrue(isRcsConsentFastPath(AsterismClient.RCS, ConsentVersion.RCS_CONSENT))
++    }
++
++    @Test fun existingRcsDefaultVersionsRemainFastPath() {
++        assertTrue(isRcsConsentFastPath(AsterismClient.RCS, ConsentVersion.RCS_DEFAULT_ON_LEGAL_FYI))
++        assertTrue(isRcsConsentFastPath(AsterismClient.RCS, ConsentVersion.RCS_DEFAULT_ON_OUT_OF_BOX))
++        assertTrue(isRcsConsentFastPath(AsterismClient.RCS, ConsentVersion.RCS_DEFAULT_ON_LEGAL_FYI_IN_SETTINGS))
++    }
++
++    @Test fun nonRcsClientCannotUseRcsFastPath() {
++        assertFalse(isRcsConsentFastPath(AsterismClient.CONSTELLATION, ConsentVersion.RCS_CONSENT))
++    }
++
++    @Test fun unspecifiedConsentVersionIsNotFastPath() {
++        assertFalse(isRcsConsentFastPath(AsterismClient.RCS, ConsentVersion.CONSENT_VERSION_UNSPECIFIED))
++    }
++}
+diff --git a/play-services-asterism/core/src/test/kotlin/org/microg/gms/asterism/core/samsung/SamsungCompositeTokenCodecTest.kt b/play-services-asterism/core/src/test/kotlin/org/microg/gms/asterism/core/samsung/SamsungCompositeTokenCodecTest.kt
+new file mode 100644
+index 00000000..c8afa84e
+--- /dev/null
++++ b/play-services-asterism/core/src/test/kotlin/org/microg/gms/asterism/core/samsung/SamsungCompositeTokenCodecTest.kt
+@@ -0,0 +1,27 @@
++package org.microg.gms.asterism.core.samsung
++
++import java.util.Base64
