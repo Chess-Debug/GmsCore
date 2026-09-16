@@ -1,0 +1,120 @@
+-                consent.gaia_consents.any {
+-                    it.asterism_client == asterismClient && it.consent == Consent.CONSENTED
+-                }
+-
+-        if (!consented) {
+-            Log.e(TAG, "Consent has not been set. Auto-setting consent.")
+-            val consentType = parseConsentVersion(request.extras)
+-            val semantics = resolveRcsAutoConsentRequestSemantics(consentType)
+-            val setRequest = SetConsentRequest(
+-                header_ = RequestHeader(
+-                    context,
+-                    sessionId,
+-                    buildContext,
+-                    "setConsent",
+-                    semantics.triggerType
+-                ),
+-                asterism_client = asterismClient,
+-                rcs_consent = RcsConsent(
+-                    consent = Consent.CONSENTED,
+-                    consent_version = semantics.rcsConsentVersion
+-                ),
+-                consent_version = semantics.requestConsentVersion,
+-                api_params = Param.getList(request.extras)
+-            )
+-            try {
+-                RpcClient.phoneDeviceVerificationClient.SetConsent().execute(setRequest)
+-                Log.i(TAG, "Auto-consented for $asterismClient")
+-            } catch (e: Exception) {
+-                Log.w(TAG, "Auto-consent failed", e)
+-            }
++        if (!hasRequiredVerificationConsent(consent, asterismClient)) {
++            throw NoConsentException()
+         }
+     }
+ 
+diff --git a/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/proto/builder/CommonBuilders.kt b/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/proto/builder/CommonBuilders.kt
+index f93d8f21..d274dac7 100644
+--- a/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/proto/builder/CommonBuilders.kt
++++ b/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/proto/builder/CommonBuilders.kt
+@@ -53,6 +53,7 @@ suspend operator fun RequestHeader.Companion.invoke(
+     val authManager = if (includeClientAuth) context.authManager else null
+     val clientAuth = if (includeClientAuth) {
+         val (signature, timestamp) = authManager!!.signIidToken(buildContext.iidToken)
++        org.microg.gms.constellation.core.requireNonEmptyClientSignature(signature)
+         org.microg.gms.constellation.core.proto.ClientAuth(
+             device_id = DeviceID(context, buildContext.iidToken),
+             signature = signature.toByteString(),
+diff --git a/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/verification/MtSmsVerifier.kt b/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/verification/MtSmsVerifier.kt
+index 1f8d4d89..e762a12b 100644
+--- a/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/verification/MtSmsVerifier.kt
++++ b/play-services-constellation/core/src/main/kotlin/org/microg/gms/constellation/core/verification/MtSmsVerifier.kt
+@@ -47,13 +47,18 @@ suspend fun MTChallenge.verify(
+     )
+ }
+ 
++internal fun effectiveMtSmsInboxSubIds(subIds: Iterable<Int>): List<Int> {
++    val specific = subIds.filter { it >= 0 }.distinct()
++    return specific + listOf(-1)
++}
++
+ internal object MtSmsInboxRegistry {
+     private val inboxes = ConcurrentHashMap<Int, MtSmsInbox>()
+ 
+     fun prepare(context: Context, subIds: Iterable<Int>) {
+         dispose()
+ 
+-        val effectiveSubIds = subIds.distinct().ifEmpty { listOf(-1) }
++        val effectiveSubIds = effectiveMtSmsInboxSubIds(subIds)
+         for (subId in effectiveSubIds) {
+             inboxes[subId] = MtSmsInbox(context.applicationContext, subId)
+         }
+diff --git a/play-services-constellation/core/src/test/kotlin/org/microg/gms/constellation/core/ClientSignatureInvariantTest.kt b/play-services-constellation/core/src/test/kotlin/org/microg/gms/constellation/core/ClientSignatureInvariantTest.kt
+new file mode 100644
+index 00000000..d02882c4
+--- /dev/null
++++ b/play-services-constellation/core/src/test/kotlin/org/microg/gms/constellation/core/ClientSignatureInvariantTest.kt
+@@ -0,0 +1,17 @@
++package org.microg.gms.constellation.core
++
++import org.junit.Assert.assertArrayEquals
++import org.junit.Test
++
++class ClientSignatureInvariantTest {
++    @Test(expected = IllegalArgumentException::class)
++    fun emptySignatureIsRejected() {
++        requireNonEmptyClientSignature(byteArrayOf())
++    }
++
++    @Test
++    fun nonEmptySignatureIsPreserved() {
++        val value = byteArrayOf(1, 2, 3)
++        assertArrayEquals(value, requireNonEmptyClientSignature(value))
++    }
++}
+diff --git a/play-services-constellation/core/src/test/kotlin/org/microg/gms/constellation/core/VerificationConsentGateTest.kt b/play-services-constellation/core/src/test/kotlin/org/microg/gms/constellation/core/VerificationConsentGateTest.kt
+new file mode 100644
+index 00000000..b037fef1
+--- /dev/null
++++ b/play-services-constellation/core/src/test/kotlin/org/microg/gms/constellation/core/VerificationConsentGateTest.kt
+@@ -0,0 +1,54 @@
++package org.microg.gms.constellation.core
++
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import org.microg.gms.constellation.core.proto.AsterismClient
++import org.microg.gms.constellation.core.proto.Consent
++import org.microg.gms.constellation.core.proto.GaiaConsent
++import org.microg.gms.constellation.core.proto.GetConsentResponse
++import org.microg.gms.constellation.core.proto.RcsConsent
++
++class VerificationConsentGateTest {
++    @Test fun dedicatedRcsConsentAllowsVerificationWhenMatchingGaiaIsAbsent() {
++        assertTrue(hasRequiredVerificationConsent(
++            GetConsentResponse(rcs_consent = RcsConsent(consent = Consent.CONSENTED)), AsterismClient.RCS))
++    }
++
++    @Test fun matchingGaiaConsentAllowsVerification() {
++        assertTrue(hasRequiredVerificationConsent(
++            GetConsentResponse(gaia_consents = listOf(
