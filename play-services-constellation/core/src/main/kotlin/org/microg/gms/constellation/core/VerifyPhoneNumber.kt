@@ -23,21 +23,15 @@ import kotlinx.coroutines.withContext
 import org.microg.gms.common.Constants
 import org.microg.gms.constellation.core.proto.AsterismClient
 import org.microg.gms.constellation.core.proto.Consent
-import org.microg.gms.constellation.core.proto.ConsentVersion
 import org.microg.gms.constellation.core.proto.DeviceID
 import org.microg.gms.constellation.core.proto.GetConsentRequest
 import org.microg.gms.constellation.core.proto.GetConsentResponse
-import org.microg.gms.constellation.core.proto.Param
-import org.microg.gms.constellation.core.proto.RcsConsent
 import org.microg.gms.constellation.core.proto.RequestHeader
-import org.microg.gms.constellation.core.proto.RequestTrigger
-import org.microg.gms.constellation.core.proto.SetConsentRequest
 import org.microg.gms.constellation.core.proto.SyncRequest
 import org.microg.gms.constellation.core.proto.Verification
 import org.microg.gms.constellation.core.proto.builder.RequestBuildContext
 import org.microg.gms.constellation.core.proto.builder.buildImsiToSubscriptionInfoMap
 import org.microg.gms.constellation.core.proto.builder.buildRequestContext
-import org.microg.gms.constellation.core.proto.builder.getList
 import org.microg.gms.constellation.core.proto.builder.invoke
 import org.microg.gms.constellation.core.verification.ChallengeProcessor
 import org.microg.gms.constellation.core.verification.MtSmsInboxRegistry
@@ -51,19 +45,18 @@ private enum class ReadCallbackMode {
     TYPED
 }
 
-internal data class RcsAutoConsentRequestSemantics(
-    val rcsConsentVersion: ConsentVersion,
-    val requestConsentVersion: ConsentVersion,
-    val triggerType: RequestTrigger.Type
-)
+internal fun requiresConsumerConsent(
+    oneTimeVerification: String?,
+    asterismClient: AsterismClient
+): Boolean = oneTimeVerification != "True" && asterismClient != AsterismClient.UNKNOWN_CLIENT
 
-internal fun resolveRcsAutoConsentRequestSemantics(
-    consentType: ConsentVersion
-): RcsAutoConsentRequestSemantics = RcsAutoConsentRequestSemantics(
-    rcsConsentVersion = ConsentVersion.RCS_CONSENT,
-    requestConsentVersion = consentType,
-    triggerType = RequestTrigger.Type.CONSENT_API_TRIGGER
-)
+internal fun hasRequiredConsumerConsent(
+    response: GetConsentResponse,
+    asterismClient: AsterismClient
+): Boolean = response.rcs_consent?.consent == Consent.CONSENTED ||
+        response.gaia_consents.any {
+            it.asterism_client == asterismClient && it.consent == Consent.CONSENTED
+        }
 
 @Suppress("DEPRECATION")
 suspend fun handleVerifyPhoneNumberV1(
@@ -232,6 +225,7 @@ private suspend fun handleVerifyPhoneNumberRequest(
             e is PhoneNumberVerificationDisabledException -> Status(5000)
             readCallbackMode != ReadCallbackMode.NONE -> Status.INTERNAL_ERROR
             e is GrpcException -> handleRpcError(e)
+            e is NoConsentException -> Status(5001)
             else -> Status.INTERNAL_ERROR
         }
     }
@@ -269,6 +263,7 @@ private suspend fun handleVerifyPhoneNumberRequest(
 }
 
 private class PhoneNumberVerificationDisabledException : Exception("Phone number verification is disabled")
+private class NoConsentException : Exception("No consent")
 
 private fun handleRpcError(error: GrpcException): Status {
     val statusCode = when (error.grpcStatus) {
@@ -297,10 +292,7 @@ private suspend fun runVerificationFlow(
         "RCS" -> AsterismClient.RCS
         else -> AsterismClient.UNKNOWN_CLIENT
     }
-    if (
-        request.extras.getString("one_time_verification") != "True" &&
-        asterismClient != AsterismClient.UNKNOWN_CLIENT
-    ) {
+    if (requiresConsumerConsent(request.extras.getString("one_time_verification"), asterismClient)) {
         val consent = getConsent(
             context,
             buildContext,
@@ -308,37 +300,9 @@ private suspend fun runVerificationFlow(
             sessionId,
         )
 
-        val consented = consent.rcs_consent?.consent == Consent.CONSENTED ||
-                consent.gaia_consents.any {
-                    it.asterism_client == asterismClient && it.consent == Consent.CONSENTED
-                }
-
-        if (!consented) {
-            Log.e(TAG, "Consent has not been set. Auto-setting consent.")
-            val consentType = parseConsentVersion(request.extras)
-            val semantics = resolveRcsAutoConsentRequestSemantics(consentType)
-            val setRequest = SetConsentRequest(
-                header_ = RequestHeader(
-                    context,
-                    sessionId,
-                    buildContext,
-                    "setConsent",
-                    semantics.triggerType
-                ),
-                asterism_client = asterismClient,
-                rcs_consent = RcsConsent(
-                    consent = Consent.CONSENTED,
-                    consent_version = semantics.rcsConsentVersion
-                ),
-                consent_version = semantics.requestConsentVersion,
-                api_params = Param.getList(request.extras)
-            )
-            try {
-                RpcClient.phoneDeviceVerificationClient.SetConsent().execute(setRequest)
-                Log.i(TAG, "Auto-consented for $asterismClient")
-            } catch (e: Exception) {
-                Log.w(TAG, "Auto-consent failed", e)
-            }
+        if (!hasRequiredConsumerConsent(consent, asterismClient)) {
+            Log.e(TAG, "Consent has not been set. Not running verification.")
+            throw NoConsentException()
         }
     }
 
@@ -370,14 +334,6 @@ private suspend fun runVerificationFlow(
     }
 
     return verifications
-}
-
-private fun parseConsentVersion(extras: Bundle): ConsentVersion {
-    val value = extras.getString("consent_type")
-    val parsed = value?.toIntOrNull()?.let(ConsentVersion::fromValue)
-        ?: value?.let { runCatching { ConsentVersion.valueOf(it) }.getOrNull() }
-    return parsed?.takeUnless { it == ConsentVersion.CONSENT_VERSION_UNSPECIFIED }
-        ?: ConsentVersion.RCS_DEFAULT_ON_LEGAL_FYI
 }
 
 private fun PhoneNumberVerification.toLegacyPhoneNumberInfoOrNull(): PhoneNumberInfo? {
