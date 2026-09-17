@@ -73,6 +73,17 @@ internal suspend fun fetchVerifiedPhoneNumbers(
     response.phone_numbers
 }
 
+internal fun findMatchingVerifiedNumber(
+    numbers: List<VerifiedPhoneNumber>,
+    targetPhone: String?
+): VerifiedPhoneNumber? {
+    if (numbers.isEmpty()) return null
+    if (!targetPhone.isNullOrEmpty()) {
+        return numbers.firstOrNull { it.phone_number == targetPhone }
+    }
+    return numbers.firstOrNull()
+}
+
 internal fun VerifiedPhoneNumber.toPhoneNumberInfo(): PhoneNumberInfo {
     val extras = Bundle().apply {
         if (id_token.isNotEmpty()) {
@@ -89,7 +100,7 @@ internal fun VerifiedPhoneNumber.toPhoneNumberInfo(): PhoneNumberInfo {
     )
 }
 
-internal fun VerifiedPhoneNumber.toPhoneNumberVerification(): PhoneNumberVerification {
+internal fun VerifiedPhoneNumber.toPhoneNumberVerification(simSlot: Int = -1): PhoneNumberVerification {
     val extras = Bundle().apply {
         putInt("rcs_state", rcs_state.value)
     }
@@ -99,7 +110,7 @@ internal fun VerifiedPhoneNumber.toPhoneNumberVerification(): PhoneNumberVerific
         phone_number,
         verification_time?.toEpochMilli() ?: 0L,
         0,
-        -1,
+        simSlot,
         id_token.ifEmpty { null },
         extras,
         1,
