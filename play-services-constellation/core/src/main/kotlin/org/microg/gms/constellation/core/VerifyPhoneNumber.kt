@@ -285,6 +285,54 @@ private fun handleRpcError(error: GrpcException): Status {
     return Status(statusCode, error.message)
 }
 
+internal fun shouldTryCachedGpnvFastPath(
+    requiredConsumerConsent: String?,
+    verificationTokenCount: Int,
+    targetedSimCount: Int
+): Boolean {
+    return requiredConsumerConsent == "RCS" &&
+            verificationTokenCount > 0 &&
+            targetedSimCount <= 1
+}
+
+private suspend fun tryCachedGpnvVerification(
+    context: Context,
+    request: VerifyPhoneNumberRequest,
+    callingPackage: String,
+    imsiToInfoMap: Map<String, SubscriptionInfo>
+): Array<PhoneNumberVerification>? {
+    val verificationTokenCount = ConstellationStateStore.loadVerificationTokens(context).size
+    if (!shouldTryCachedGpnvFastPath(
+            request.extras.getString("required_consumer_consent"),
+            verificationTokenCount,
+            request.targetedSims.size
+        )
+    ) {
+        return null
+    }
+
+    val targetPhone = request.targetedSims.firstOrNull()
+        ?.phoneNumberHint
+        ?.takeIf { it.isNotEmpty() }
+    val gpnvBundle = Bundle().apply {
+        putString("certificate_hash", request.idTokenRequest.idToken ?: "")
+        putString("token_nonce", request.idTokenRequest.subscriberHash ?: "")
+        putString("calling_package", callingPackage)
+    }
+
+    Log.i(TAG, "Using cached verification state for RCS GetVerifiedPhoneNumbers")
+    val numbers = fetchVerifiedPhoneNumbers(context, gpnvBundle, callingPackage)
+    val matchingNumber = findMatchingVerifiedNumber(numbers, targetPhone)
+        ?: throw IllegalStateException("cached GPNV: no exact target-number match")
+    if (matchingNumber.id_token.isEmpty()) {
+        throw IllegalStateException("cached GPNV: empty JWT")
+    }
+
+    val targetImsi = request.targetedSims.firstOrNull()?.imsi?.takeIf { it.isNotEmpty() }
+    val simSlot = targetImsi?.let { imsiToInfoMap[it]?.simSlotIndex } ?: -1
+    return arrayOf(matchingNumber.toPhoneNumberVerification(simSlot))
+}
+
 internal fun hasRequiredVerificationConsent(
     response: GetConsentResponse,
     asterismClient: AsterismClient
@@ -326,6 +374,11 @@ private suspend fun runVerificationFlow(
         if (!hasRequiredVerificationConsent(consent, asterismClient)) {
             throw NoConsentException()
         }
+    }
+
+    // Keep the cached read path behind the fail-closed consent gate above.
+    tryCachedGpnvVerification(context, request, callingPackage, imsiToInfoMap)?.let {
+        return it
     }
 
     val syncRequest = SyncRequest(
