@@ -58,7 +58,9 @@ class NetworkHandleProxyFactory(private val context: Context) : HandleProxyFacto
     private fun readFromDatabase(flow: String?): Triple<String, ByteArray, ByteArray>? {
         ProfileManager.ensureInitialized(context)
         val id = "$flow/${version.versionString}/${Build.FINGERPRINT}"
-        return dgDb.get(id)
+        val (storedVmKey, byteCode, extra) = dgDb.get(id) ?: return null
+        val vmKey = reusableVmCacheKey(storedVmKey, ::isValidCache) ?: return null
+        return Triple(vmKey, byteCode, extra)
     }
 
     fun createRequest(flow: String?, packageName: String, pingData: PingData? = null, extra: ByteArray? = null): Request {

@@ -7,6 +7,7 @@ package org.microg.gms.droidguard
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class DroidGuardVmCacheTest {
@@ -29,5 +30,30 @@ class DroidGuardVmCacheTest {
     fun formatVmCacheKey_preservesUppercaseHex() {
         val hex = "DEADBEEFCAFEBABE"
         assertEquals(hex, formatVmCacheKey(hex))
+    }
+
+    @Test
+    fun reusableVmCacheKey_normalizesPersistedLowercaseKeyBeforeValidation() {
+        var validatedKey: String? = null
+        val reusableKey = reusableVmCacheKey("deadbeef") { key ->
+            validatedKey = key
+            key == "DEADBEEF"
+        }
+
+        assertEquals("DEADBEEF", validatedKey)
+        assertEquals("DEADBEEF", reusableKey)
+    }
+
+    @Test
+    fun reusableVmCacheKey_preservesValidExistingCacheEntry() {
+        assertEquals(
+            "DEADBEEF",
+            reusableVmCacheKey("DEADBEEF") { it == "DEADBEEF" }
+        )
+    }
+
+    @Test
+    fun reusableVmCacheKey_rejectsMissingCacheEntry() {
+        assertNull(reusableVmCacheKey("deadbeef") { false })
     }
 }
