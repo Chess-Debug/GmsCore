@@ -34,6 +34,11 @@ import java.security.MessageDigest
 import java.util.Locale
 
 private const val TAG = "ClientInfoBuilder"
+private const val STOCK_SYNC_GMSCORE_VERSION_STRING = "26.34.33 (260400-975859951)"
+
+internal fun reportedGmsCoreVersionString(rpc: String, baseline: String): String =
+    if (rpc == "sync") STOCK_SYNC_GMSCORE_VERSION_STRING else baseline
+
 private const val PREFS_NAME = "constellation_prefs"
 
 @SuppressLint("HardwareIds")
@@ -50,7 +55,7 @@ suspend operator fun ClientInfo.Companion.invoke(
         client_public_key = context.authManager.getOrCreateKeyPair().public.encoded.toByteString(),
         locale = locale,
         gmscore_version_number = Constants.GMS_VERSION_CODE / 1000,
-        gmscore_version = packageInfo.versionName ?: "",
+        gmscore_version = reportedGmsCoreVersionString(rpc, packageInfo.versionName ?: ""),
         android_sdk_version = Build.VERSION.SDK_INT,
         user_profile_type = UserProfileType.REGULAR_USER,
         gaia_tokens = buildContext.gaiaTokens,
