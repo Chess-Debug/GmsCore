@@ -29,13 +29,11 @@ import org.microg.gms.constellation.core.proto.Ts43ChallengeResponseError
 import org.microg.gms.constellation.core.proto.Ts43ChallengeResponseStatus
 import org.microg.gms.constellation.core.verification.ts43.EapAkaService
 import org.microg.gms.constellation.core.verification.ts43.builder
+import org.microg.gms.constellation.core.verification.ts43.subscriberIdIfPermitted
 import org.microg.gms.constellation.core.verification.ts43.userAgent
-import org.xml.sax.InputSource
 import java.io.IOException
-import java.io.StringReader
 import java.util.Locale
 import java.util.concurrent.TimeUnit
-import javax.xml.parsers.DocumentBuilderFactory
 
 private const val TAG = "Ts43Verifier"
 
@@ -124,17 +122,61 @@ fun Ts43Challenge.verify(context: Context, subId: Int): ChallengeResponse {
             httpHistory
         )
 
-        val responseBody = performOdsaRequest(
-            context,
-            telephonyManager,
-            okHttpClient,
-            httpHistory,
-            entitlement_url,
-            op,
-            requestPayload,
-            app_id,
-            requestType
-        )
+        val responseBody = try {
+            performOdsaRequest(
+                context,
+                telephonyManager,
+                okHttpClient,
+                httpHistory,
+                entitlement_url,
+                op,
+                requestPayload,
+                app_id,
+                requestType
+            )
+        } catch (failure: Ts43ApiException) {
+            val originalRequest = service_entitlement_request
+            if (!Ts43RetryPolicy.shouldRefreshToken(
+                    failure.httpStatus,
+                    originalRequest?.authentication_token?.isNotEmpty() == true,
+                    originalRequest?.temporary_token?.isNotEmpty() == true
+                )
+            ) {
+                throw failure
+            }
+
+            // AOSP treats HTTP 511 as an expired cached token. Force a fresh
+            // SIM-backed EAP-AKA flow once; neither token may accompany it.
+            httpHistory += "RETRY ODSA after expired token"
+            val freshRequest = Ts43RetryPolicy.withoutExpiredTokens(
+                originalRequest ?: throw failure
+            )
+            val refreshedPayload = buildOdsaRequestPayload(
+                context,
+                telephonyManager,
+                eapAkaService,
+                okHttpClient,
+                httpHistory,
+                entitlement_url,
+                eap_aka_realm,
+                freshRequest,
+                app_id
+            ) ?: throw failure
+
+            // The retry is intentionally not wrapped in another recovery
+            // handler. A second 511 is a real error, not an infinite loop.
+            performOdsaRequest(
+                context,
+                telephonyManager,
+                okHttpClient,
+                httpHistory,
+                entitlement_url,
+                op,
+                refreshedPayload,
+                app_id,
+                requestType
+            )
+        }
         ChallengeResponse(
             ts43_challenge_response = responseBuilder(responseBody, httpHistory.toList())
         )
@@ -188,7 +230,9 @@ private fun performOdsaRequest(
     val userAgent = req?.userAgent(context) ?: "PRD-TS43 OS-Android/${Build.VERSION.RELEASE}"
     val accept = req?.accept_content_type?.takeIf { it.isNotEmpty() } ?: "application/json"
     val acceptLanguage = Locale.getDefault().toLanguageTag().ifEmpty { "en-US" }
-    httpHistory += "GET $url"
+    // The request URL can contain the IMSI, ICCID, EAP identity, and bearer tokens.
+    // Keep the operation in diagnostics without returning those values to callers.
+    httpHistory += "GET ODSA entitlement"
 
     val request = Request.Builder()
         .url(url)
@@ -199,7 +243,7 @@ private fun performOdsaRequest(
 
     return try {
         val response = okHttpClient.newCall(request).execute()
-        httpHistory += "RESP ${response.code} ${request.url}"
+        httpHistory += "RESP ODSA ${response.code}"
         if (response.isSuccessful) {
             response.body?.string()
                 ?: throw Ts43ApiException(
@@ -241,7 +285,9 @@ private fun buildOdsaRequestPayload(
     if (req.authentication_token.isNotEmpty() || req.temporary_token.isNotEmpty()) return req
 
     val mccMnc = telephonyManager.simOperator ?: ""
-    val imsi = telephonyManager.subscriberId ?: ""
+    // A regular microG install cannot assume Android 10+ privileged identifier access.
+    // Without a legitimate IMSI, EAP-AKA cannot proceed; never fabricate one.
+    val imsi = telephonyManager.subscriberIdIfPermitted().orEmpty()
     if (mccMnc.length < 5 || imsi.isEmpty()) return null
 
     val eapId = eapAkaService.buildEapId(mccMnc, imsi, eapAkaRealm)
@@ -260,7 +306,7 @@ private fun buildOdsaRequestPayload(
         .header("User-Agent", userAgent)
         .header("Accept-Language", acceptLanguage)
         .build()
-    httpHistory += "GET $initialUrl"
+    httpHistory += "GET EAP entitlement"
 
     for (round in 1..3) {
         val response = try {
@@ -276,7 +322,7 @@ private fun buildOdsaRequestPayload(
         }
 
         val body = response.body?.string() ?: return null
-        httpHistory += "RESP ${response.code} ${currentRequest.url}"
+        httpHistory += "RESP EAP round $round ${response.code}"
         if (!response.isSuccessful) {
             Log.w(TAG, "EAP round $round failed with code ${response.code}")
             throw Ts43ApiException(
@@ -317,7 +363,7 @@ private fun buildOdsaRequestPayload(
                 )
             )
             .build()
-        httpHistory += "POST $postUrl"
+        httpHistory += "POST EAP entitlement"
     }
 
     return null
@@ -334,25 +380,7 @@ private fun extractAuthToken(body: String): String? {
         JSONObject(body).optJSONObject("Token")?.optString("token")
     }.getOrNull()?.takeIf { it.isNotEmpty() }?.let { return it }
 
-    return runCatching {
-        val normalized = body
-            .replace("&", "&amp;")
-            .replace("&amp;amp;", "&amp;")
-            .replace("\r\n", "\n")
-        val doc = DocumentBuilderFactory.newInstance()
-            .newDocumentBuilder()
-            .parse(InputSource(StringReader(normalized)))
-        val parms = doc.getElementsByTagName("parm")
-        for (i in 0 until parms.length) {
-            val node = parms.item(i)
-            val attrs = node.attributes ?: continue
-            val name = attrs.getNamedItem("name")?.nodeValue ?: continue
-            if (name == "token") {
-                return@runCatching attrs.getNamedItem("value")?.nodeValue
-            }
-        }
-        null
-    }.getOrNull()?.takeIf { it.isNotEmpty() }
+    return Ts43XmlToken.extract(body)
 }
 
 private fun failureResponse(

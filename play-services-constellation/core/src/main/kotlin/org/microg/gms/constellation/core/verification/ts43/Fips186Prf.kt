@@ -16,7 +16,8 @@ object Fips186Prf {
             md.update(ck)
             md.digest()
         } catch (_: NoSuchAlgorithmException) {
-            ByteArray(20)
+            // Missing SHA-1 must abort authentication, never derive keys from zeros.
+            return emptyMap()
         }
 
         if (xKey.size != 20) return emptyMap()

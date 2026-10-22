@@ -13,18 +13,32 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.microg.gms.constellation.core.proto.OdsaOperation
 import org.microg.gms.constellation.core.proto.ServiceEntitlementRequest
 
+// Android 10+ restricts persistent telephony identifiers to privileged or
+// carrier-authorized callers. An unavailable identifier is not a credential.
+internal fun TelephonyManager.subscriberIdIfPermitted(): String? = try {
+    subscriberId
+} catch (_: SecurityException) {
+    null
+}
+
+internal fun TelephonyManager.imeiIfPermitted(): String? = try {
+    imei
+} catch (_: SecurityException) {
+    null
+}
+
 fun ServiceEntitlementRequest.builder(
     telephonyManager: TelephonyManager,
     eapId: String,
     appIds: List<String> = emptyList()
 ) = ServiceEntitlementBuilder(
-    imsi = telephonyManager.subscriberId ?: "",
+    imsi = telephonyManager.subscriberIdIfPermitted().orEmpty(),
     iccid = try {
         telephonyManager.simSerialNumber
     } catch (_: Exception) {
         null
     },
-    terminalId = telephonyManager.imei,
+    terminalId = if (terminal_id.isNotEmpty()) null else telephonyManager.imeiIfPermitted(),
     terminalVendor = Build.MANUFACTURER.orEmpty(),
     terminalModel = Build.MODEL.orEmpty(),
     terminalSoftwareVersion = Build.VERSION.RELEASE.orEmpty(),
@@ -48,13 +62,17 @@ fun OdsaOperation.builder(
     serviceEntitlementRequest: ServiceEntitlementRequest? = null,
     appIds: List<String> = emptyList()
 ) = ServiceEntitlementBuilder(
-    imsi = telephonyManager.subscriberId ?: "",
+    imsi = telephonyManager.subscriberIdIfPermitted().orEmpty(),
     iccid = try {
         telephonyManager.simSerialNumber
     } catch (_: Exception) {
         null
     },
-    terminalId = telephonyManager.imei,
+    terminalId = if (serviceEntitlementRequest?.terminal_id?.isNotEmpty() == true) {
+        null
+    } else {
+        telephonyManager.imeiIfPermitted()
+    },
     terminalVendor = Build.MANUFACTURER.orEmpty(),
     terminalModel = Build.MODEL.orEmpty(),
     terminalSoftwareVersion = Build.VERSION.RELEASE.orEmpty(),
@@ -80,6 +98,9 @@ class ServiceEntitlementBuilder(
 ) {
     fun buildBaseUrl(entitlementUrl: String): HttpUrl {
         val baseUrl = entitlementUrl.toHttpUrl()
+        // AOSP requires an HTTPS entitlement server. Subscriber identifiers,
+        // EAP identities and cached tokens must never be sent in cleartext.
+        require(baseUrl.isHttps) { "TS.43 entitlement server must use HTTPS" }
 
         // GMS truncates these fields: vendor (4), model (10), sw_version (20)
         val vendor = resolveTerminalValue(req.terminal_vendor, terminalVendor, 4)

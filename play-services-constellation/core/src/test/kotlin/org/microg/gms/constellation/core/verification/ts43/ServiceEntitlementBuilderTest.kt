@@ -6,10 +6,27 @@
 package org.microg.gms.constellation.core.verification.ts43
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.microg.gms.constellation.core.proto.ServiceEntitlementRequest
 
 class ServiceEntitlementBuilderTest {
+
+    @Test(expected = IllegalArgumentException::class)
+    fun buildBaseUrl_rejectsPlaintextEntitlementServerBeforeAddingCredentials() {
+        val request = ServiceEntitlementRequest(authentication_token = "local-test-token")
+        builder(request, deviceTerminalId = "local-test-device")
+            .buildBaseUrl("http://example.com/entitlement")
+    }
+
+    @Test
+    fun buildBaseUrl_preservesHttpsForEntitlementRequest() {
+        val request = ServiceEntitlementRequest(temporary_token = "local-test-token")
+        val url = builder(request, deviceTerminalId = "local-test-device")
+            .buildBaseUrl("https://example.com/entitlement")
+        assertTrue(url.isHttps)
+        assertEquals("local-test-token", url.queryParameter("temporary_token"))
+    }
 
     @Test
     fun buildBaseUrl_explicitTerminalIdOverridesDeviceFallback() {
